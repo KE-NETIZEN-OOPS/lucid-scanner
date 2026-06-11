@@ -1,0 +1,21 @@
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Scan output (never commit findings against any target)
+report_*.md
+findings*.json
+*.json
+!.vscode/*.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
