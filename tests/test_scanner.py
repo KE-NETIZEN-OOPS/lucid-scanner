@@ -10,12 +10,25 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import base64
+import json as _json
+
 from lucid_scanner import (  # noqa: E402
     Finding,
     Scanner,
     SEV_ORDER,
+    extract_supabase_creds,
     render_markdown,
 )
+
+
+def _fake_jwt(role):
+    """Build an unsigned JWT-shaped token whose payload carries a role."""
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').decode().rstrip("=")
+    payload = base64.urlsafe_b64encode(
+        _json.dumps({"iss": "supabase", "role": role}).encode()
+    ).decode().rstrip("=")
+    return f"{header}.{payload}.{'s' * 20}"
 
 
 def test_finding_rejects_unknown_severity():
@@ -107,3 +120,28 @@ def test_render_markdown_handles_no_findings():
     # every severity row present with a zero count
     for label in ("Critical", "High", "Medium", "Low", "Info"):
         assert f"{label} | 0 |" in md
+
+
+def test_extract_supabase_creds_finds_url_and_anon_key():
+    anon = _fake_jwt("anon")
+    text = (
+        'const c=createClient("https://zqalbxcyacmeeevarxwy.supabase.co",'
+        f'"{anon}");'
+    )
+    url, key = extract_supabase_creds(text)
+    assert url == "https://zqalbxcyacmeeevarxwy.supabase.co"
+    assert key == anon
+
+
+def test_extract_supabase_creds_ignores_service_role_key():
+    # A service_role key must never be returned for probing.
+    service = _fake_jwt("service_role")
+    text = f'url="https://abcdefghijklmnop.supabase.co" key="{service}"'
+    url, key = extract_supabase_creds(text)
+    assert url == "https://abcdefghijklmnop.supabase.co"
+    assert key is None
+
+
+def test_extract_supabase_creds_returns_none_without_supabase():
+    url, key = extract_supabase_creds("just some unrelated bundle code")
+    assert url is None and key is None

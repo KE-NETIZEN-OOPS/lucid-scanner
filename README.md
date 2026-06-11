@@ -33,6 +33,7 @@ remediation that names the actual config knob to turn, not generic advice.
 | 8  | Reachable admin / login pages |
 | 9  | Error-based SQL injection probes (non-destructive — no `DROP`/`UPDATE`/`DELETE`) |
 | 10 | Leaked credentials in client JS/HTML (Stripe, AWS, Google, GitHub, Slack tokens, private keys) |
+| 11 | Supabase/PostgREST backend — anon key extracted from client JS, then tables probed for missing/permissive Row-Level Security (counts only, never pulls row data) |
 
 ## Install
 

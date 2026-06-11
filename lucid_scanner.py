@@ -66,6 +66,54 @@ CF_RANGES = ('172.66.', '172.67.', '172.64.', '104.16.', '104.17.', '104.18.',
              '162.158.', '173.245.', '188.114.')
 VERCEL_RANGES = ('216.150.', '76.76.21.', '76.76.19.')
 
+# Supabase / PostgREST detection. The anon key is *meant* to be public (it
+# ships in the client bundle); the only thing standing between it and the
+# whole database is Row-Level Security. This phase tests whether RLS is
+# actually doing its job.
+SUPABASE_URL_RE = re.compile(r'https://([a-z0-9]{8,})\.supabase\.co')
+JWT_RE = re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')
+SUPABASE_TABLE_WORDLIST = [
+    'profiles', 'users', 'accounts', 'customers', 'members', 'people',
+    'payments', 'transactions', 'orders', 'invoices', 'subscriptions',
+    'messages', 'chats', 'conversations', 'contacts', 'leads', 'listings',
+    'posts', 'comments', 'reviews', 'bookings', 'events', 'products',
+    'admin_users', 'admins', 'roles', 'settings', 'config', 'notifications',
+    'sessions', 'files', 'media', 'waitlist', 'subscribers', 'emails',
+    'feedback', 'tickets', 'addresses', 'cards',
+]
+
+
+def _jwt_payload(token):
+    """Best-effort decode of a JWT payload (no signature check). Returns {}."""
+    import base64
+    try:
+        seg = token.split('.')[1]
+        seg += '=' * (-len(seg) % 4)
+        return json.loads(base64.urlsafe_b64decode(seg.encode()))
+    except Exception:
+        return {}
+
+
+def extract_supabase_creds(text):
+    """Find a Supabase project URL and its *anon* key in client-side text.
+
+    Pure/offline so it is unit-testable. Returns (project_url, anon_key);
+    either element may be None. Only a JWT whose decoded role == 'anon' is
+    returned as the key — service_role keys are ignored (they should never
+    appear client-side, and probing with one would be meaningless).
+    """
+    m = SUPABASE_URL_RE.search(text or '')
+    if not m:
+        return (None, None)
+    url = m.group(0)
+    anon = None
+    for tok in JWT_RE.findall(text or ''):
+        if _jwt_payload(tok).get('role') == 'anon':
+            anon = tok
+            break
+    return (url, anon)
+
+
 # ============================================================================
 # Finding model
 # ============================================================================
@@ -94,6 +142,7 @@ class StackDetector:
             'cms': set(),
             'auth': set(),
             'hosting': set(),
+            'backend': set(),
         }
 
     def detect(self):
@@ -152,6 +201,13 @@ class StackDetector:
         if 'clerk' in body.lower()[:5000]:
             self.stack['auth'].add('clerk')
 
+        # --- Backend-as-a-service hints (URL may live in a linked JS bundle,
+        #     so this is only a hint; check_supabase_backend confirms it) ---
+        if 'supabase' in body.lower() or SUPABASE_URL_RE.search(body):
+            self.stack['backend'].add('supabase')
+        if 'firebaseio.com' in body or 'firebasedatabase.app' in body:
+            self.stack['backend'].add('firebase')
+
         return self.stack
 
     def is_wp(self):     return 'wordpress' in self.stack['app_framework']
@@ -161,6 +217,7 @@ class StackDetector:
     def is_devise(self): return 'devise' in self.stack['auth']
     def is_cf(self):     return 'cloudflare' in self.stack['cdn']
     def is_woo(self):    return 'woocommerce' in self.stack['cms']
+    def is_supabase(self): return 'supabase' in self.stack['backend']
 
 
 # ============================================================================
@@ -727,6 +784,97 @@ class Scanner:
                              fix='Rotate immediately. Move to server-side only.')
 
     # ============================================================
+    # PHASE 11: Supabase / PostgREST RLS exposure
+    # ============================================================
+    def _gather_client_text(self):
+        """Homepage HTML + the linked JS bundles, concatenated. The Supabase
+        URL and anon key usually live in a vendor bundle, not the HTML."""
+        r = self.fetch('/')
+        if not r:
+            return ''
+        text = r.text or ''
+        scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', text)
+        for s in scripts[:25]:
+            try:
+                sr = self.session.get(urljoin(self.base, s), timeout=TIMEOUT)
+                text += '\n' + (sr.text or '')
+            except Exception:
+                pass
+        return text
+
+    def _supabase_table_count(self, base_url, headers, table):
+        """Return how many rows the anon role can read from `table`, or None.
+
+        Uses HEAD + `Prefer: count=exact` so we learn the row count WITHOUT
+        ever pulling a row of data — the scanner must never exfiltrate the
+        very PII it is warning about. A correctly-locked table returns count
+        0 (RLS filters everything); a missing table returns 404.
+        """
+        try:
+            rr = self.session.request(
+                'HEAD', f'{base_url}/rest/v1/{table}',
+                headers={**headers, 'Prefer': 'count=exact', 'Range': '0-0'},
+                timeout=TIMEOUT)
+        except requests.RequestException:
+            return None
+        if rr.status_code not in (200, 206):
+            return None
+        tail = rr.headers.get('content-range', '').split('/')[-1]
+        return int(tail) if tail.isdigit() else None
+
+    def check_supabase_backend(self):
+        self.log('\n[Phase 11] Supabase backend / RLS exposure')
+        sb_url, anon = extract_supabase_creds(self._gather_client_text())
+        if not sb_url:
+            return
+        self.stack_backend_found = True
+        if self.detector:
+            self.detector.stack['backend'].add('supabase')
+        self.log(f'  detected Supabase backend: {sb_url}')
+
+        if not anon:
+            self.add('info',
+                     'Supabase backend detected but no anon key found in client JS',
+                     evidence=sb_url,
+                     impact='Could not test RLS without the publishable anon key.',
+                     fix='Manually verify Row-Level Security is enabled on every '
+                         'table in the Supabase dashboard.')
+            return
+
+        headers = {'apikey': anon, 'Authorization': f'Bearer {anon}'}
+        exposed = []
+        for t in SUPABASE_TABLE_WORDLIST:
+            n = self._supabase_table_count(sb_url, headers, t)
+            if n and n > 0:
+                exposed.append((t, n))
+
+        if exposed:
+            ev = '\n'.join(f'{t}: {n} row(s) readable by anon' for t, n in exposed)
+            total = sum(n for _, n in exposed)
+            self.add('critical',
+                     f'Supabase tables readable by the anonymous key '
+                     f'({len(exposed)} table(s), ~{total} rows)',
+                     evidence=ev,
+                     impact='The anon key ships in every visitor\'s browser, so '
+                            'anyone can SELECT these rows directly from the REST '
+                            'API. Row-Level Security is missing or permissive — '
+                            'this is how a "whole database" gets dumped.',
+                     fix='ALTER TABLE <t> ENABLE ROW LEVEL SECURITY on every table, '
+                         'then add policies that scope rows to the authenticated '
+                         'owner (auth.uid()). Put paid/sensitive columns behind a '
+                         'security-definer RPC or a restricted view. NOTE: the anon '
+                         'key is not a secret — rotating it does nothing; only RLS '
+                         'closes this.')
+        else:
+            self.add('info',
+                     'Supabase backend present; no anon-readable tables found',
+                     evidence=sb_url,
+                     impact='Common table names returned no rows to the anon key — '
+                            'consistent with RLS being enforced.',
+                     fix='Spot-check any app-specific table names not in the probe '
+                         'wordlist.')
+
+    # ============================================================
     # Orchestration
     # ============================================================
     def run(self):
@@ -755,6 +903,7 @@ class Scanner:
             self.check_hidden_admins,
             self.check_sqli_probe,
             self.check_secrets_in_assets,
+            self.check_supabase_backend,
         ]
         for fn in steps:
             try:
