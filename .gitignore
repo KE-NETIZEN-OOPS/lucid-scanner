@@ -15,6 +15,47 @@ findings*.json
 *.json
 !.vscode/*.json
 
+# Audit working files (client-specific — never commit)
+*-security-audit.md
+*-FINAL-report.md
+*-lucid.md
+*-lucid.json
+*-profiles-SHARE.html
+*-profiles*.md.enc
+*-sub-*.md
+*_probe.py
+*_attack.py
+*_inject*.py
+*_exploit*.py
+*_recon.py
+*_swarm.py
+*_discover.py
+*_app.js
+*_config.js
+*_config_raw.js
+*_tokens.txt
+*_session_cookies.json
+agent[0-9]_*.txt
+parallel_results.txt
+fresh_attack_results.txt
+wrbet_*.py
+fxpesa_*.py
+fxpesa_*.js
+fxpesa_*.png
+fxpesa_*.json
+faidatrade_*.py
+999yes_*.py
+y99_*.py
+patachat_*.py
+ganjibets_*.json
+wrbet-findings.json
+*.ps1
+decrypt-file.ps1
+encrypt-file.ps1
+make-shareable.ps1
+bf_attack.py
+extract_paths.py
+
 # OS / editor
 .DS_Store
 .vscode/
